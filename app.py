@@ -1,223 +1,298 @@
-#import streamlit as st
-#import pandas as pd
-#import numpy as np
-
-# Use caching to efficiently load data only once
-#@st.cache_data
-#def load_data():
-   # Load 10,000 rows of data
-   #data = pd.DataFrame(
-       #np.random.randn(10000, 2) / [50, 50] + [37.76, -122.4],
-       #columns=['lat', 'lon']
-   
-   #return data
-
-#st.title('Simple Data Explorer')
-
-# Load the data
-#df = load_data()
-
-# 1. Add a Widget to control the data
-#st.subheader('Filter Data')
-#num_points = st.slider('Number of points to display', 100, 10000, 1000)
-
-# 2. Filter the data based on the widget value
-#filtered_df = df.head(num_points)
-
-# 3. Display the results
-#st.subheader(f'Displaying the first {num_points} data points')
-#st.dataframe(filtered_df)
-
-# 4. Visualize the results on a map
-#st.map(filtered_df)
-
-
-
-#ในการใช้ API Key และฟังก์ชัน $response = model.generate\_content(prompt)$ กับโค้ด Streamlit ที่ได้ให้ไว้ก่อนหน้านี้ จะเป็นการ **แทนที่ส่วนของการวิเคราะห์เนื้อหาจำลอง (Mock Data)** ด้วยการเรียกใช้งานจริงครับ
-
-#นี่คือโครงสร้างโค้ดที่รวมการใช้งาน **Gemini API** เข้ากับ Streamlit และ Web Scraping โดยใช้ $response = client.models.generate\_content()$ :
-
-## 💻 โค้ด Python ฉบับสมบูรณ์ที่ใช้ API Call
-
-#โค้ดนี้จะใช้ `google-genai` library (สมมติว่าคุณติดตั้งและมี API Key แล้ว)
-
-#```python
 import streamlit as st
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+import pandas as pd
 import json
-import os # ใช้สำหรับเรียก API Key จาก Environment Variable หรือ st.secrets
-from typing import List, Dict, Any
+import time # For exponential backoff
 
-st.set_page_config(page_title="News Vocab Extractor with LLM", layout="wide")
-# ********** ส่วนการตั้งค่า API และ Model **********
-
-# **1. การจัดการ API Key อย่างปลอดภัย**
-# แนะนำให้ใช้ st.secrets หรือ Environment Variables (เช่น os.environ.get("GEMINI_API_KEY"))
-# สำหรับตัวอย่างนี้ จะใช้ st.secrets ซึ่งเป็นวิธีมาตรฐานของ Streamlit
+# 1. Imports and Configuration
 try:
+    # Use the Google GenAI SDK (pip install google-genai)
     from google import genai
-    # ใช้คีย์จาก st.secrets หากรันบน Streamlit Cloud หรือตั้งค่า local secrets
-    # หากรัน local ต้องตั้งค่า GEMINI_API_KEY ในไฟล์ .streamlit/secrets.toml
-    API_KEY = st.secrets.get("AIzaSyC8XBq4qiuar9rWFJt5JZttX0Fxy7ffpg0") 
-    if not API_KEY:
-        st.error("API Key ไม่ถูกตั้งค่าใน st.secrets กรุณาตรวจสอบการตั้งค่า.")
-        # หากไม่มี ให้ดึงจาก Environment Variable ทั่วไป
-        API_KEY = os.environ.get("AIzaSyC8XBq4qiuar9rWFJt5JZttX0Fxy7ffpg0")
-
-    if API_KEY:
-        client = genai.Client(api_key=API_KEY)
-        MODEL_NAME = "gemini-2.5-flash"
-    else:
-        client = None
-        st.warning("ไม่สามารถเชื่อมต่อ Gemini API ได้ (API Key หายไป)")
+    from google.genai import types
+    from google.genai.errors import APIError
 except ImportError:
-    st.error("กรุณาติดตั้งไลบรารี google-genai: pip install google-genai")
-    client = None
-except Exception as e:
-    st.error(f"เกิดข้อผิดพลาดในการตั้งค่า API Client: {e}")
-    client = None
-    
-# ********** ส่วนการกำหนด Prompt และ Schema **********
+    st.error("ไลบรารี 'google-genai' ไม่ได้ถูกติดตั้ง กรุณาติดตั้งโดยใช้: pip install google-genai")
+    st.stop()
 
-def get_response_schema():
-    """กำหนด JSON Schema เพื่อให้ Output เป็นตารางที่ถูกต้อง"""
-    return {
-        "type": "object",
-        "properties": {
-            "vocabulary_list": {
-                "type": "array",
-                "description": "รายการคำศัพท์ที่วิเคราะห์ได้",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "คำศัพท์ (English)": {"type": "string", "description": "คำศัพท์ภาษาอังกฤษที่ถูกระบุ"},
-                        "คำแปล (Thai)": {"type": "string", "description": "คำแปลหลักเป็นภาษาไทย"},
-                        "ประโยคที่ปรากฏในข่าว": {"type": "string", "description": "ประโยคเต็มจากเนื้อหาที่ปรากฏคำศัพท์นั้น"},
-                        "ตัวอย่างประโยค": {"type": "string", "description": "ประโยคตัวอย่างใหม่ที่สร้างขึ้นโดยใช้คำศัพท์"}
-                    },
-                    "required": ["คำศัพท์ (English)", "คำแปล (Thai)", "ประโยคที่ปรากฏในข่าว", "ตัวอย่างประโยค"]
-                }
-            }
-        },
-        "required": ["vocabulary_list"]
-    }
+MODEL_NAME = "gemini-2.5-flash"
 
-def create_prompt(text_content: str) -> str:
-    """สร้าง Prompt สำหรับการวิเคราะห์เนื้อหาข่าว"""
-    return f"""
-    คุณเป็นผู้เชี่ยวชาญด้านภาษาอังกฤษที่ทำหน้าที่วิเคราะห์ข่าว 
-    
-    1. **วิเคราะห์**เนื้อหาข่าวภาษาอังกฤษที่ให้มาด้านล่างนี้
-    2. **ระบุ**คำศัพท์ภาษาอังกฤษที่สำคัญหรือน่าสนใจที่สุด 5-7 คำ
-    3. สำหรับแต่ละคำศัพท์:
-        a. **หา**ประโยคเต็มที่ปรากฏคำศัพท์นั้นในเนื้อหา
-        b. **แปล**คำศัพท์นั้นเป็นภาษาไทย (คำแปลหลักที่เหมาะสมกับบริบท)
-        c. **สร้าง**ประโยคตัวอย่างใหม่ (ที่ไม่ใช่ประโยคในข่าว) ที่ใช้คำศัพท์นั้น
-    4. **ส่งออก**ผลลัพธ์ทั้งหมดในรูปแบบ JSON ตาม JSON Schema ที่กำหนดไว้เท่านั้น
-    
-    **เนื้อหาข่าวสำหรับวิเคราะห์:**
-    ---
-    {text_content}
-    ---
-    """
-    
-# ********** ฟังก์ชันหลักสำหรับ Web Scraping และ API Call **********
+# 2. Utility Functions
 
-def extract_and_analyze_content_with_api(url: str) -> List[Dict[str, Any]]:
-    """
-    ดึงเนื้อหาจาก URL และใช้ Gemini API ในการวิเคราะห์คำศัพท์
-    """
-    if not client:
-        return []
-        
-    st.info(f"กำลังดึงเนื้อหาจาก: {url}...")
-    
+def get_article_text(url):
+    """ดึงข้อความหลักจาก URL ข่าว."""
     try:
-        # 1. Web Scraping
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response_scrape = requests.get(url, headers=headers, timeout=15)
-        response_scrape.raise_for_status()
-        soup = BeautifulSoup(response_scrape.content, 'html.parser')
+        # Set a common User-Agent to avoid being blocked by some websites
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Try to find main text from common article tags (p, h1-h3)
+        paragraphs = soup.find_all(['p', 'h1', 'h2', 'h3'])
         
-        # ดึงเนื้อหาที่เป็นข้อความหลัก (ปรับ selector ตามเว็บข่าวจริง)
-        text_content = soup.find('body').get_text(separator=' ', strip=True) 
+        # Filter empty text and join them
+        article_text = "\n".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+
+        # If text is too short, try using the whole body as fallback
+        if len(article_text) < 100:
+             article_text = soup.body.get_text(separator='\n', strip=True)
+             
+        if not article_text:
+            return None, "ไม่พบเนื้อหาที่ชัดเจนในหน้านี้"
+
+        # Limit the text size sent to the LLM to save cost and prevent exceeding limits
+        # Note: This is the raw (noisy) text limit. The cleaned text will be shorter.
+        max_length = 15000
+        if len(article_text) > max_length:
+            article_text = article_text[:max_length] + "..."
+            st.warning(f"ข้อความข่าวที่ดึงมา (ก่อนการกรอง) ถูกตัดให้เหลือเพียง {max_length} ตัวอักษรเพื่อความรวดเร็วในการประมวลผล")
+
+        return article_text, None
+
+    except requests.exceptions.RequestException as e:
+        return None, f"ไม่สามารถดึงข้อมูลจาก URL ได้: {e}"
+    except Exception as e:
+        return None, f"เกิดข้อผิดพลาดในการประมวลผล: {e}"
+
+
+def extract_main_content_with_gemini(client, noisy_text):
+    """ใช้ Gemini เพื่อดึงเฉพาะเนื้อหาหลักของบทความจากข้อความที่อาจมีสิ่งรบกวน."""
+    extraction_prompt = f"""
+    คุณคือผู้ช่วยดึงเนื้อหาหลัก (Core Article Extractor)
+    จงวิเคราะห์ข้อความต่อไปนี้ซึ่งถูกดึงมาจากหน้าเว็บข่าว
+    ข้อความนี้อาจมีเนื้อหาที่ไม่เกี่ยวข้อง เช่น เมนูนำทาง, โฆษณา, คำบรรยายรูปภาพ, หรือส่วนท้ายของเว็บไซต์
+    หน้าที่ของคุณคือ:
+    1.  คัดเลือก **เฉพาะเนื้อหาหลักของบทความข่าว** (บทนำ, ย่อหน้าเนื้อหา, บทสรุป)
+    2.  ละเว้นส่วนที่ไม่ใช่เนื้อหาหลัก เช่น ส่วนหัว, ส่วนท้าย, เมนู, ลิงก์ที่เกี่ยวข้อง, และคำอธิบายภาพที่ไม่ใช่เนื้อหา
+    3.  ตอบกลับด้วยเนื้อหาหลักที่ถูกคัดเลือกมาเท่านั้น
+
+    --- ข้อความที่ถูกดึงมา ---
+    {noisy_text}
+    """
+    
+    # Configure the API call for text extraction
+    extraction_system_instruction = "คุณคือ Core Article Extractor ที่แม่นยำและตอบกลับด้วยข้อความที่สะอาดเท่านั้น"
+    extraction_config = types.GenerateContentConfig(
+        system_instruction=extraction_system_instruction
+    )
+
+    response = make_gemini_call_with_retry(
+        client,
+        contents=[extraction_prompt],
+        config=extraction_config
+    )
+
+    if response and response.text:
+        return response.text.strip(), None
+    else:
+        return None, "ไม่สามารถดึงเนื้อหาหลักด้วย Gemini ได้"
+
+
+def make_gemini_call_with_retry(client, contents, config=None, max_retries=3):
+    """เรียกใช้ Gemini API พร้อมกลไก Exponential Backoff."""
+    for attempt in range(max_retries):
+        try:
+            # Call the API with contents and configuration
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=contents,
+                config=config,
+            )
+            return response
+        except APIError as e:
+            if attempt < max_retries - 1:
+                # Exponential backoff logic: 1s, 2s, 4s wait times
+                wait_time = 2 ** attempt 
+                st.warning(f"เกิดข้อผิดพลาดจาก API ({e}) ลองใหม่ใน {wait_time} วินาที...")
+                time.sleep(wait_time)
+            else:
+                st.error(f"การเรียก API ล้มเหลวหลังจาก {max_retries} ครั้ง: {e}")
+                return None
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิดในการเรียก API: {e}")
+            return None
+    return None
+
+# 3. Streamlit App Layout and Logic
+
+st.set_page_config(
+    page_title="เรียนภาษาอังกฤษจากข่าว",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.title("📰 เรียนภาษาอังกฤษจากข่าว")
+st.markdown("ใส่ URL ข่าวภาษาอังกฤษ เพื่อรับการสรุปภาษาไทยและตารางคำศัพท์สำหรับฝึกฝน!")
+
+# --- Sidebar for API Key ---
+with st.sidebar:
+    st.header("การตั้งค่า API")
+    gemini_api_key = st.text_input(
+        "กรุณาใส่ Gemini API Key ของคุณ",
+        type="password",
+        key="gemini_api_key"
+    )
+    st.markdown("หากยังไม่มีคีย์ สามารถรับได้จาก [Google AI Studio](https://ai.google.dev/gemini-api/docs/api-key)")
+
+# --- Main Input ---
+news_url = st.text_input(
+    "ใส่ URL ของบทความข่าวภาษาอังกฤษที่นี่:",
+    key="news_url",
+    placeholder="เช่น https://www.bbc.com/news/world-us-canada-67616140"
+)
+
+# Create the process button
+process_button = st.button("ประมวลผลข่าว", type="primary", key="process_news_button")
+
+if process_button:
+    # 1. Input Validation
+    if not news_url:
+        st.info("กรุณาใส่ URL ของบทความข่าว")
+        st.stop()
         
-        # จำกัดขนาดเนื้อหาเพื่อประหยัด Token (สำคัญ!)
-        context_text = text_content[:10000] 
-        st.caption(f"ความยาวเนื้อหาที่ถูกส่งไปวิเคราะห์: {len(context_text)} ตัวอักษร")
+    if not gemini_api_key:
+        st.error("กรุณาใส่ Gemini API Key ในแถบด้านข้างก่อน!")
+        st.stop()
+    
+    if not news_url.startswith(('http://', 'https://')):
+        st.error("URL ไม่ถูกต้อง กรุณาใส่ URL ที่ขึ้นต้นด้วย http:// หรือ https://")
+        st.stop()
+
+    # --- Step 1: Extract Article Text (Noisy) ---
+    with st.spinner("กำลังดึงข้อความจาก URL..."):
+        noisy_article_text, error = get_article_text(news_url)
+
+    if error:
+        st.error(error)
+        st.stop()
+
+    if not noisy_article_text or len(noisy_article_text) < 50:
+        st.error("ไม่สามารถดึงข้อความข่าวที่มีความหมายได้ กรุณาลอง URL อื่น.")
+        st.stop()
+
+    st.success("ดึงข้อความข่าวสำเร็จ!")
+
+    try:
+        # Initialise Gemini Client
+        client = genai.Client(api_key=gemini_api_key)
+    except Exception as e:
+        st.error(f"ไม่สามารถเริ่มต้น Gemini Client ได้: {e}. ตรวจสอบ API Key ของคุณ.")
+        st.stop()
         
-        # 2. API Call ด้วย model.generate_content(prompt)
-        prompt = create_prompt(context_text)
+    # --- Step 1.5: Clean Article Text with Gemini ---
+    st.subheader("1.5 การกรองเนื้อหาหลักอัตโนมัติ")
+    with st.spinner("กำลังให้ Gemini กรองเฉพาะเนื้อหาข่าวหลัก..."):
+        clean_article_text, extraction_error = extract_main_content_with_gemini(client, noisy_article_text)
         
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[prompt],
-            config=genai.types.GenerateContentConfig(
-                # บังคับให้ Output เป็น JSON ตาม Schema
-                response_mime_type="application/json",
-                response_schema=get_response_schema()
+    if extraction_error:
+        st.error(extraction_error)
+        # Fallback: Use the original noisy text if cleaning fails
+        clean_article_text = noisy_article_text 
+        st.warning("เนื่องจากเกิดข้อผิดพลาดในการกรองเนื้อหาหลัก ระบบจะใช้ข้อความที่ดึงมาทั้งหมดแทน (อาจมีสิ่งรบกวน)")
+    else:
+        st.success("กรองเนื้อหาหลักสำเร็จ!")
+
+    # --- Display Part 1: Cleaned Text ---
+    st.header("1. ข้อความข่าวภาษาอังกฤษฉบับหลักที่ถูกกรองแล้ว")
+    st.text_area(
+        "เนื้อหาข่าวที่ถูกกรองแล้ว:", 
+        clean_article_text, 
+        height=300, 
+        disabled=True,
+        key="cleaned_text"
+    )
+
+    # --- Step 2: Generate Thai Summary (Part 2) ---
+    st.header("2. สรุปข่าวเป็นภาษาไทย")
+    with st.spinner("กำลังให้ Gemini สรุปข่าวเป็นภาษาไทย..."):
+        # Use the CLEANED text for the prompt
+        summary_prompt = f"สรุปเนื้อหาข่าวภาษาอังกฤษต่อไปนี้ให้เป็นภาษาไทยที่กระชับและเข้าใจง่าย ในรูปแบบย่อหน้าเดียว:\n\n---\n\n{clean_article_text}"
+        summary_system_instruction = "คุณคือผู้ช่วยสรุปข่าวที่เชี่ยวชาญภาษาไทย"
+
+        # Create config object and pass system_instruction inside
+        summary_config = types.GenerateContentConfig(
+            system_instruction=summary_system_instruction
+        )
+
+        summary_response = make_gemini_call_with_retry(
+            client, 
+            contents=[summary_prompt], 
+            config=summary_config
+        )
+        
+        if summary_response and summary_response.text:
+            st.markdown(f"**สรุป:** {summary_response.text}")
+        else:
+            st.error("ไม่สามารถสร้างบทสรุปได้ (โปรดตรวจสอบ API Key และโควต้า)")
+
+
+    # --- Step 3: Generate Vocabulary Table (Part 3) ---
+    st.header("3. ตารางคำศัพท์และตัวอย่างประโยค")
+    with st.spinner("กำลังให้ Gemini สร้างตารางคำศัพท์ 5 คำ..."):
+        
+        # Define the JSON Schema for structured output
+        vocab_schema = types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "English_Word": types.Schema(type=types.Type.STRING, description="ศัพท์ภาษาอังกฤษระดับมัธยมจากข่าว"),
+                    "Thai_Translation": types.Schema(type=types.Type.STRING, description="คำแปลภาษาไทย"),
+                    "Example_Sentence": types.Schema(type=types.Type.STRING, description="ประโยคเต็มที่ใช้คำนั้นจากข้อความข่าวเดิม")
+                },
+                required=["English_Word", "Thai_Translation", "Example_Sentence"]
             )
         )
         
-        # 3. ประมวลผลผลลัพธ์จาก API
-        json_output = json.loads(response.text)
+        vocab_system_instruction = "คุณคือครูสอนภาษาอังกฤษที่เชี่ยวชาญการสร้างบทเรียนจากเนื้อหาจริง คุณต้องตอบกลับเป็น JSON ที่ตรงตาม Schema ที่กำหนดเท่านั้น"
+
+        # Create config object and pass system_instruction and schema inside
+        vocab_config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=vocab_schema,
+            system_instruction=vocab_system_instruction
+        )
         
-        if 'vocabulary_list' in json_output:
-            st.success("✅ วิเคราะห์คำศัพท์ด้วย API สำเร็จ!")
-            return json_output['vocabulary_list']
-        else:
-            st.error("❌ API Response มีปัญหาหรือไม่เป็นไปตามรูปแบบที่คาดหวัง")
-            return []
+        # Use the CLEANED text for the prompt
+        vocab_prompt = f"จากข้อความข่าวต่อไปนี้ ให้คุณสร้างรายการคำศัพท์ 5 คำที่เหมาะสำหรับนักเรียนระดับมัธยมปลาย พร้อมคำแปลภาษาไทย และตัวอย่างประโยคที่ใช้คำนั้น ซึ่งต้องมาจากข้อความข่าวเดิมเท่านั้น:\n\n---\n\n{clean_article_text}"
 
-    except requests.exceptions.RequestException as e:
-        st.error(f"เกิดข้อผิดพลาดในการดึงข้อมูลจาก URL: {e}")
-        return []
-    except json.JSONDecodeError:
-        st.error("❌ API ตอบกลับมา แต่มีข้อผิดพลาดในการถอดรหัส JSON (Response ไม่เป็น JSON ที่ถูกต้อง)")
-        st.code(response.text, language="json") # แสดง Output ดิบ
-        return []
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดทั่วไป: {e}")
-        return []
+        vocab_response = make_gemini_call_with_retry(
+            client, 
+            contents=[vocab_prompt], 
+            config=vocab_config
+        )
 
-# ********** Streamlit App Layout **********
-
-def main():
-    st.title("📰 News Vocabulary Extractor (LLM Powered)")
-    
-    st.markdown("""
-        แอปพลิเคชันนี้ใช้ **Web Scraping** ดึงเนื้อหาและใช้ **Gemini API** พร้อม **Prompt** ในการวิเคราะห์และสร้างตารางคำศัพท์.
-    """)
-    
-    news_url = st.text_input(
-        "ใส่ลิงค์ (URL) ของเว็บไซต์ข่าวภาษาอังกฤษ:",
-        placeholder="เช่น https://www.bbc.com/news/world",
-        key="url_input"
-    )
-    
-    if st.button("🔍 เริ่มวิเคราะห์คำศัพท์"):
-        if client is None:
-            st.error("ไม่สามารถดำเนินการได้ เนื่องจาก API Client ไม่ได้ถูกตั้งค่าอย่างถูกต้อง.")
-            return
-
-        if news_url:
-            with st.spinner('กำลังดึงข้อมูลและเรียก API เพื่อวิเคราะห์...'):
-                # เรียกใช้ฟังก์ชันที่ใช้ API Call
-                analysis_data = extract_and_analyze_content_with_api(news_url)
-            
-            if analysis_data:
-                # สร้าง DataFrame และแสดงผล
-                df_vocab = pd.DataFrame(analysis_data)
+        if vocab_response and vocab_response.text:
+            try:
+                # Parse the JSON string output
+                vocab_data = json.loads(vocab_response.text)
                 
-                st.subheader("📊 ตารางคำศัพท์สำคัญจากข่าว (สร้างโดย AI)")
-                st.dataframe(df_vocab, use_container_width=True)
-            else:
-                st.warning("ไม่สามารถวิเคราะห์คำศัพท์ได้ (โปรดดูข้อความ Error ด้านบน)")
-        else:
-            st.error("กรุณาใส่ลิงค์ (URL) ก่อนเริ่มการวิเคราะห์")
+                # Convert to DataFrame and rename columns for display
+                vocab_df = pd.DataFrame(vocab_data)
+                vocab_df.columns = ["ศัพท์ภาษาอังกฤษ", "คำแปลภาษาไทย", "ตัวอย่างประโยค (จากข่าว)"]
 
-if __name__ == "__main__":
-    main()
-#```
+                # Display the DataFrame
+                st.dataframe(
+                    vocab_df, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    # Set column width to give more space for example sentences
+                    column_config={
+                        "ตัวอย่างประโยค (จากข่าว)": st.column_config.TextColumn(
+                            "ตัวอย่างประโยค (จากข่าว)",
+                            width="large"
+                        )
+                    }
+                )
+
+            except json.JSONDecodeError:
+                st.error("ข้อผิดพลาด: Gemini ตอบกลับเป็นรูปแบบ JSON ที่ไม่ถูกต้อง")
+                st.text(vocab_response.text)
+            except Exception as e:
+                st.error(f"ข้อผิดพลาดในการแสดงผลตาราง: {e}")
+        else:
+            st.error("ไม่สามารถสร้างตารางคำศัพท์ได้ (โปรดตรวจสอบ API Key และโควต้า)")
